@@ -68,6 +68,8 @@ export default function Fish() {
       const prev = stage;
       stage = next;
       fish.stage = next;
+      // Fast scrolling can skip through several stages in a row: stop any in-flight morph first
+      gsap.killTweensOf(forms.current);
       forms.current.forEach((f, i) => {
         if (i !== next && i !== prev) gsap.set(f, { autoAlpha: 0 });
       });
