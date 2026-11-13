@@ -22,7 +22,8 @@ let running = false;
 let lastY = 0;
 let raf = 0;
 
-export const fish = { x: -200, y: -200, scale: 1, facing: 1 }; // shared so the bubble canvas can follow the fish
+// Shared so the particle canvas can follow the fish: its position, life stage and evolution bursts
+export const fish = { x: -200, y: -200, scale: 1, facing: 1, stage: 0, burstAt: 0, halfWidth: 40 };
 
 export function zoneFor(depth: number) {
   if (depth < 200) return "Sunlight zone";

@@ -60,6 +60,11 @@ export default function Ocean() {
     let lastScroll = window.scrollY;
     let fishBubbleAt = 0;
 
+    // Short-lived sparks: evolution bursts and the glowing wake of the deep-sea form
+    type Spark = { x: number; y: number; vx: number; vy: number; life: number; decay: number; r: number; rgb: string };
+    const sparks: Spark[] = [];
+    let lastBurst = 0;
+
     const unsub = subscribeDepth((s) => {
       const [top, bottom] = waterAt(s.depth);
       water.current!.style.background = `linear-gradient(180deg, ${top} 0%, ${bottom} 100%)`;
@@ -81,9 +86,34 @@ export default function Ocean() {
       // The fish exhales a bubble now and then
       if (fish.x > 0 && s.t - fishBubbleAt > 0.9 + Math.random()) {
         fishBubbleAt = s.t;
-        const b = spawn("bubble", fish.x + 28 * fish.scale * fish.facing, fish.y - 6);
+        const b = spawn("bubble", fish.x + fish.halfWidth * 0.85 * fish.facing, fish.y - 6);
         b.r = 1.5 + Math.random() * 2.5;
         parts.push(b);
+      }
+
+      // Evolution burst: a ring of sparks and a puff of bubbles
+      if (fish.burstAt !== lastBurst) {
+        lastBurst = fish.burstAt;
+        const rgb = fish.stage >= 3 ? "127,246,255" : fish.stage === 2 ? "255,190,120" : "255,236,200";
+        for (let i = 0; i < 46; i++) {
+          const a = (i / 46) * Math.PI * 2 + Math.random() * 0.2;
+          const v = 2.5 + Math.random() * 5;
+          sparks.push({ x: fish.x, y: fish.y, vx: Math.cos(a) * v, vy: Math.sin(a) * v, life: 1, decay: 0.012 + Math.random() * 0.012, r: 1.5 + Math.random() * 2.5, rgb });
+        }
+        for (let i = 0; i < 14; i++) {
+          const b = spawn("bubble", fish.x + (Math.random() - 0.5) * fish.halfWidth, fish.y + (Math.random() - 0.5) * 30);
+          b.vy = -(1 + Math.random() * 2);
+          parts.push(b);
+        }
+      }
+      // Luminous form leaves a glowing wake behind its tail
+      if (fish.stage >= 3 && !reduce && fish.x > 0) {
+        sparks.push({
+          x: fish.x - fish.facing * fish.halfWidth * 0.8 + (Math.random() - 0.5) * 6,
+          y: fish.y + (Math.random() - 0.5) * 10,
+          vx: -fish.facing * (0.3 + Math.random() * 0.5), vy: (Math.random() - 0.5) * 0.4,
+          life: 1, decay: 0.018 + Math.random() * 0.01, r: 1 + Math.random() * 1.8, rgb: Math.random() < 0.2 ? "255,233,168" : "127,246,255",
+        });
       }
 
       const dy = Math.max(-60, Math.min(60, window.scrollY - lastScroll)); // clamp so jumps (anchor links) don't smear particles
@@ -130,6 +160,24 @@ export default function Ocean() {
           ctx.fillRect(p.x - p.r * 6, p.y - p.r * 6, p.r * 12, p.r * 12);
         }
       }
+
+      ctx.globalCompositeOperation = "lighter";
+      for (let i = sparks.length - 1; i >= 0; i--) {
+        const sp = sparks[i];
+        sp.x += sp.vx; sp.y += sp.vy - dy * 0.6;
+        sp.vx *= 0.94; sp.vy *= 0.94;
+        sp.life -= sp.decay;
+        if (sp.life <= 0) { sparks.splice(i, 1); continue; }
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, sp.r * 3.2, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${sp.rgb},${0.18 * sp.life})`;
+        ctx.fill();
+        ctx.beginPath();
+        ctx.arc(sp.x, sp.y, sp.r, 0, Math.PI * 2);
+        ctx.fillStyle = `rgba(${sp.rgb},${0.95 * sp.life})`;
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = "source-over";
     });
 
     return () => { unsub(); window.removeEventListener("resize", resize); };

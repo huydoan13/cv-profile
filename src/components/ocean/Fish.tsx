@@ -1,17 +1,39 @@
 "use client";
 
 import { useEffect, useRef } from "react";
+import { gsap } from "gsap";
 import { fish, subscribeDepth } from "@/lib/depth";
+import { FishDefs, FORMS, STAGES } from "./FishForms";
 
-const W = 96; // rendered width at scale 1
+const VB_W = 168;
+const VB_H = 96;
+const W = 124; // rendered width at scale 1
+const H = (W * VB_H) / VB_W;
+const THRESHOLDS = [150, 600, 1800]; // metres where the fish evolves
+const HYST = 12;
 
-/** The little fish. It follows the pointer (or wanders on touch), dives with the scroll and grows as it goes deeper. */
+type Part = { el: SVGGElement; cx: number; cy: number };
+
+function stageFor(depth: number, current: number) {
+  let s = current;
+  while (s < THRESHOLDS.length && depth > THRESHOLDS[s] + HYST) s++;
+  while (s > 0 && depth < THRESHOLDS[s - 1] - HYST) s--;
+  return s;
+}
+
+/**
+ * The fish. It follows the pointer (or wanders on touch), grows with the scroll and evolves
+ * through four life stages as it dives: fry → juvenile → adult → luminous deep-sea form.
+ */
 export default function Fish() {
   const root = useRef<HTMLDivElement>(null);
   const flip = useRef<HTMLDivElement>(null);
-  const tail = useRef<SVGGElement>(null);
-  const fin = useRef<SVGPathElement>(null);
   const glow = useRef<HTMLDivElement>(null);
+  const ring = useRef<HTMLDivElement>(null);
+  const toast = useRef<HTMLDivElement>(null);
+  const toastName = useRef<HTMLSpanElement>(null);
+  const toastLine = useRef<HTMLSpanElement>(null);
+  const forms = useRef<(HTMLDivElement | null)[]>([]);
 
   useEffect(() => {
     const reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -20,11 +42,58 @@ export default function Fish() {
     const onMove = (e: PointerEvent) => { pointer.x = e.clientX; pointer.y = e.clientY; pointer.active = true; pointer.last = performance.now(); };
     if (fine) window.addEventListener("pointermove", onMove);
 
+    const parts = (sel: string) =>
+      forms.current.flatMap((f) =>
+        Array.from(f!.querySelectorAll<SVGGElement>(`[${sel}]`)).map((el) => {
+          const [cx, cy] = el.getAttribute(sel)!.split(" ").map(Number);
+          return { el, cx, cy } as Part;
+        }),
+      );
+    const tails = parts("data-tail");
+    const fins = parts("data-fin");
+    const lures = parts("data-lure");
+    const eyes = parts("data-eye");
+
     // Start above the surface and drop in
     fish.x = window.innerWidth * 0.7;
     fish.y = -120;
     let rot = 0;
     let tailPhase = 0;
+    let stage = -1;
+    let blinkUntil = 0;
+    let nextBlink = performance.now() + 2500;
+    let toastTl: gsap.core.Timeline | null = null;
+
+    const evolve = (next: number, animate: boolean) => {
+      const prev = stage;
+      stage = next;
+      fish.stage = next;
+      forms.current.forEach((f, i) => {
+        if (i !== next && i !== prev) gsap.set(f, { autoAlpha: 0 });
+      });
+      gsap.to(glow.current, { opacity: next === 3 ? 1 : next === 2 ? 0.35 : 0, duration: 1.2 });
+      if (!animate || prev < 0 || reduce) {
+        if (prev >= 0) gsap.set(forms.current[prev], { autoAlpha: 0 });
+        gsap.set(forms.current[next], { autoAlpha: 1, scale: 1, filter: "blur(0px)" });
+        return;
+      }
+      const deeper = next > prev;
+      gsap.to(forms.current[prev], { autoAlpha: 0, scale: deeper ? 0.55 : 1.3, filter: "blur(6px)", duration: 0.45, ease: "power2.in" });
+      gsap.fromTo(
+        forms.current[next],
+        { autoAlpha: 0, scale: deeper ? 1.7 : 0.6, filter: "blur(10px)" },
+        { autoAlpha: 1, scale: 1, filter: "blur(0px)", duration: 1.1, delay: 0.2, ease: "elastic.out(1, 0.5)" },
+      );
+      if (!deeper) return;
+      fish.burstAt = performance.now();
+      gsap.fromTo(ring.current, { scale: 0.2, opacity: 1 }, { scale: 3.4, opacity: 0, duration: 1.2, ease: "expo.out", delay: 0.15 });
+      toastName.current!.textContent = STAGES[next].name;
+      toastLine.current!.textContent = STAGES[next].line;
+      toastTl?.kill();
+      toastTl = gsap.timeline()
+        .fromTo(toast.current, { autoAlpha: 0, y: 14, scale: 0.9 }, { autoAlpha: 1, y: 0, scale: 1, duration: 0.5, ease: "back.out(2)", delay: 0.25 })
+        .to(toast.current, { autoAlpha: 0, y: -10, duration: 0.5, ease: "power2.in" }, "+=2.2");
+    };
 
     const unsub = subscribeDepth((s) => {
       const vw = window.innerWidth;
@@ -32,19 +101,26 @@ export default function Fish() {
       const mobile = vw < 768;
       const idle = !pointer.active || performance.now() - pointer.last > 4000;
 
+      const nextStage = stageFor(s.depth, Math.max(0, stage));
+      if (nextStage !== stage) evolve(nextStage, stage >= 0);
+
+      // Grows steadily for the whole dive
+      fish.scale = mobile ? 0.42 + s.scroll * 1.0 : 0.45 + s.scroll * 1.75;
+      const half = (W / 2) * fish.scale;
+      fish.halfWidth = half;
+
       // Where the fish wants to be
       let tx: number, ty: number;
       if (!idle && !reduce) {
-        tx = pointer.x - 60;
-        ty = pointer.y + 40;
+        tx = pointer.x - 60 - half * 0.3;
+        ty = pointer.y + 40 + half * 0.2;
       } else {
-        tx = vw * (mobile ? 0.72 : 0.78) + Math.sin(s.t * 0.35) * vw * (mobile ? 0.12 : 0.1);
-        ty = vh * (mobile ? 0.8 : 0.58) + Math.sin(s.t * 0.8) * 22;
+        tx = vw * (mobile ? 0.7 : 0.76) + Math.sin(s.t * 0.35) * vw * (mobile ? 0.1 : 0.09);
+        ty = vh * (mobile ? 0.8 : 0.6) + Math.sin(s.t * 0.8) * 22;
       }
       ty += Math.max(-80, Math.min(80, s.velocity * 2)); // pushed by the dive
-      const half = (W / 2) * fish.scale; // keep the whole fish on screen as it grows
       tx = Math.max(half, Math.min(vw - half, tx));
-      ty = Math.max(70 + half * 0.4, Math.min(vh - 30 - half * 0.6, ty));
+      ty = Math.max(80 + half * 0.4, Math.min(vh - 30 - half * 0.5, ty));
 
       const k = reduce ? 1 : 0.035;
       const dx = (tx - fish.x) * k;
@@ -56,53 +132,54 @@ export default function Fish() {
       const speed = Math.hypot(dx, dy) + Math.abs(s.velocity) * 0.2;
       const targetRot = Math.max(-35, Math.min(35, (dy * 3 + s.velocity * 0.6) * fish.facing));
       rot += (targetRot - rot) * 0.08;
-      // Grows steadily for the whole dive: a tiny fry at the surface, a big fish in the abyss
-      const growth = s.scroll; // tied to scroll position so it grows a little with every section
-      fish.scale = mobile ? 0.45 + growth * 1.15 : 0.5 + growth * 2.1;
 
+      // Swimming motion for every form's moving parts
       tailPhase += reduce ? 0 : 0.12 + Math.min(0.5, speed * 0.04);
-      tail.current!.setAttribute("transform", `rotate(${Math.sin(tailPhase) * 22} 26 36)`);
-      fin.current!.setAttribute("transform", `rotate(${Math.sin(tailPhase + 1) * 14} 66 44)`);
+      const tailA = Math.sin(tailPhase) * 22;
+      const finA = Math.sin(tailPhase + 1) * 14;
+      const lureA = Math.sin(s.t * 1.6) * 9;
+      const now = performance.now();
+      if (now > nextBlink) { blinkUntil = now + 130; nextBlink = now + 2500 + Math.random() * 3000; }
+      const eyeS = now < blinkUntil ? 0.1 : 1;
+      for (const p of tails) p.el.setAttribute("transform", `rotate(${tailA} ${p.cx} ${p.cy})`);
+      for (const p of fins) p.el.setAttribute("transform", `rotate(${finA} ${p.cx} ${p.cy})`);
+      for (const p of lures) p.el.setAttribute("transform", `rotate(${lureA} ${p.cx} ${p.cy})`);
+      for (const p of eyes) p.el.setAttribute("transform", `translate(${p.cx} ${p.cy}) scale(1 ${eyeS}) translate(${-p.cx} ${-p.cy})`);
 
-      root.current!.style.transform = `translate(${fish.x - W / 2}px, ${fish.y - 30}px) rotate(${rot}deg) scale(${fish.scale})`;
+      root.current!.style.transform = `translate(${fish.x - W / 2}px, ${fish.y - H / 2}px) rotate(${rot}deg) scale(${fish.scale})`;
       flip.current!.style.transform = `scaleX(${fish.facing})`;
-      glow.current!.style.opacity = String(Math.min(1, Math.max(0, (s.depth - 1200) / 1500)));
+      toast.current!.style.left = `${fish.x}px`;
+      toast.current!.style.top = `${fish.y - H * fish.scale * 0.5 - 34}px`;
     });
 
-    return () => { unsub(); window.removeEventListener("pointermove", onMove); };
+    return () => { unsub(); toastTl?.kill(); window.removeEventListener("pointermove", onMove); };
   }, []);
 
   return (
-    <div ref={root} aria-hidden className="pointer-events-none fixed left-0 top-0 z-[5] will-change-transform" style={{ width: W, transform: "translate(-200px,-200px)" }}>
-      <div ref={glow} className="absolute -inset-16 rounded-full opacity-0" style={{ background: "radial-gradient(circle, rgba(255,190,120,0.45) 0%, rgba(95,212,244,0.12) 40%, transparent 70%)" }} />
-      <div ref={flip} className="relative transition-transform duration-300">
-        <svg viewBox="0 0 120 72" width={W} className="drop-shadow-[0_6px_14px_rgba(0,20,40,0.35)]">
-          <defs>
-            <linearGradient id="fish-body" x1="0" x2="1" y1="0" y2="1">
-              <stop offset="0" stopColor="#ff9a5a" />
-              <stop offset="0.6" stopColor="#ffb86b" />
-              <stop offset="1" stopColor="#ffd58a" />
-            </linearGradient>
-            <linearGradient id="fish-fin" x1="0" x2="1">
-              <stop offset="0" stopColor="#ff7a4d" />
-              <stop offset="1" stopColor="#ffa86a" />
-            </linearGradient>
-          </defs>
-          <g ref={tail}>
-            <path d="M28,36 C18,26 10,16 2,12 C7,26 7,46 2,60 C10,56 18,46 28,36 Z" fill="url(#fish-fin)" />
-          </g>
-          <path d="M48,16 C56,2 74,2 82,16 Z" fill="url(#fish-fin)" />
-          <path d="M22,36 C32,12 74,6 100,26 C110,33 110,41 100,48 C74,66 32,60 22,36 Z" fill="url(#fish-body)" />
-          <path d="M52,13 C46,24 46,48 52,59" stroke="#fff6ea" strokeWidth="5" fill="none" opacity="0.9" strokeLinecap="round" />
-          <path d="M36,40 C50,52 78,54 98,46" stroke="#ffe7c2" strokeWidth="3" fill="none" opacity="0.7" strokeLinecap="round" />
-          <path ref={fin} d="M66,44 C62,54 54,58 48,58 C54,50 58,46 66,44 Z" fill="url(#fish-fin)" />
-          <circle cx="88" cy="31" r="6.5" fill="#fff" />
-          <circle cx="89.5" cy="31.5" r="3.6" fill="#0b1a2b" />
-          <circle cx="91" cy="29.8" r="1.3" fill="#fff" />
-          <ellipse cx="86" cy="42" rx="4" ry="2.2" fill="#ff8a7a" opacity="0.55" />
-          <path d="M101,38 C103,39 103,41 101,42" stroke="#7a3a1e" strokeWidth="1.4" fill="none" strokeLinecap="round" />
-        </svg>
+    <>
+      <div ref={root} aria-hidden className="pointer-events-none fixed left-0 top-0 z-[5] will-change-transform" style={{ width: W, height: H, transform: "translate(-300px,-300px)" }}>
+        <div ref={glow} className="absolute -inset-[60%] rounded-full opacity-0" style={{ background: "radial-gradient(circle, rgba(127,246,255,0.35) 0%, rgba(95,212,244,0.12) 35%, transparent 65%)" }} />
+        <div ref={ring} className="absolute left-1/2 top-1/2 -ml-[60px] -mt-[60px] h-[120px] w-[120px] rounded-full border-2 border-white/80 opacity-0 shadow-[0_0_30px_rgba(255,255,255,0.8),inset_0_0_20px_rgba(127,246,255,0.6)]" />
+        <div ref={flip} className="relative h-full w-full transition-transform duration-300">
+          {FORMS.map((Form, i) => (
+            <div key={i} ref={(el) => { forms.current[i] = el; }} className="absolute inset-0 opacity-0" style={{ visibility: "hidden" }}>
+              <svg viewBox={`0 0 ${VB_W} ${VB_H}`} width="100%" height="100%" overflow="visible" className={i < 3 ? "drop-shadow-[0_6px_14px_rgba(0,20,40,0.35)]" : ""}>
+                {i === 0 && <FishDefs />}
+                <Form />
+              </svg>
+            </div>
+          ))}
+        </div>
       </div>
-    </div>
+      <div
+        ref={toast}
+        aria-hidden
+        className="pointer-events-none fixed z-30 -translate-x-1/2 -translate-y-full whitespace-nowrap rounded-full px-4 py-2 text-center opacity-0 glass"
+        style={{ left: -999, top: -999, visibility: "hidden" }}
+      >
+        <span className="block font-mono text-[10px] uppercase tracking-[0.18em] text-accent-2">✦ Evolved · <span ref={toastName} /></span>
+        <span ref={toastLine} className="block text-xs text-fg/85" />
+      </div>
+    </>
   );
 }
